@@ -1,0 +1,32 @@
+# =====================================================================
+# CORE — the free pipeline (scrape -> geocode -> dashboard). No paid
+# services. Install these to run everything except the optional LLM step.
+# =====================================================================
+
+# Step 1: scraping
+requests
+beautifulsoup4
+lxml
+python-dateutil
+
+# Step 3: geocoding (uses free OpenStreetMap/Nominatim; no API key)
+geopy
+
+# Step 4: dashboard
+streamlit
+folium
+streamlit-folium
+pandas
+# (altair ships with streamlit and powers the time-series chart)
+
+
+# =====================================================================
+# OPTIONAL — only needed if your supervisor approves the PAID LLM step
+# (enrich_llm.py). These pull in the Anthropic API client. See
+# LLM_COST_MEMO.md before enabling. Uncomment to install.
+# =====================================================================
+
+# anthropic           # Claude API client; needs ANTHROPIC_API_KEY + paid account
+# trafilatura         # extracts main article text for the LLM to read
+
+
