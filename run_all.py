@@ -31,6 +31,7 @@ import os
 from datetime import datetime
 
 import conflict_ids
+import fetch_text
 import common
 import scraper_elespectador as ee
 import scraper_infoamazonia as ia
@@ -103,12 +104,18 @@ def run_all(selected_keys: list[str], max_per_source: int, out_path: str,
     new_added = len(deduped) - len(existing_rows)
     logging.info("Wrote %d rows to %s in %.1fs (%d new this run).",
                  len(deduped), out_path, elapsed, max(new_added, 0))
-    
+
     # 4. Assign stable conflict IDs across the combined dataset.
     try:
         conflict_ids.main()
     except Exception as e:  # noqa: BLE001 - don't lose the scraped data if this fails
         logging.exception("Conflict ID step failed and was skipped: %s", e)
+
+    # 5. Fetch the full article text for any new rows that don't have it yet.
+    try:
+        fetch_text.main([])
+    except Exception as e:  # noqa: BLE001 - don't lose the scraped data if this fails
+        logging.exception("Full-text fetch step failed and was skipped: %s", e)
 
 
 def parse_cli(argv=None) -> argparse.Namespace:
