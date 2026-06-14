@@ -255,7 +255,7 @@ def main() -> None:
         st.caption("No dated rows in the current selection.")
     else:
         chart = (alt.Chart(mc).mark_bar().encode(
-            x=alt.X("month:T", title="Month"),
+            x=alt.X("month:T", title="Year"),
             y=alt.Y("count:Q", title="Articles"),
             color=alt.Color("theme:N", title="Theme"),
             tooltip=["month:T", "theme:N", "count:Q"],
