@@ -32,6 +32,7 @@ from datetime import datetime
 
 import conflict_ids
 import fetch_text
+import match_admin
 import common
 import scraper_elespectador as ee
 import scraper_infoamazonia as ia
@@ -116,6 +117,13 @@ def run_all(selected_keys: list[str], max_per_source: int, out_path: str,
         fetch_text.main([])
     except Exception as e:  # noqa: BLE001 - don't lose the scraped data if this fails
         logging.exception("Full-text fetch step failed and was skipped: %s", e)
+
+    # 6. Match each article down to its municipality (admin_2 / admin_3) and
+    #    record the gadm_id, using the article_text just fetched.
+    try:
+        match_admin.main([])
+    except Exception as e:  # noqa: BLE001 - don't lose the scraped data if this fails
+        logging.exception("Admin match step failed and was skipped: %s", e)
 
 
 def parse_cli(argv=None) -> argparse.Namespace:
