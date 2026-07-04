@@ -43,6 +43,45 @@ SECTOR_COLORS = {
     "other": "gray",
     "": "lightgray",
 }
+
+# The clean admin columns produced by match_admin.py / finalize_columns.py.
+COUNTRY_COL = "country (admin 0)"
+REGION_COL = "region (admin 1)"
+MUNI_COL = "municipality (admin 2)"
+SUBDIST_COL = "sub-district (admin 3)"
+
+# Human-readable display names for the coded sector / event values, so the
+# filters, popups and table don't show raw strings like "logging_deforestation".
+SECTOR_LABELS = {
+    "mining": "Mining",
+    "oil_gas": "Oil & Gas",
+    "logging_deforestation": "Logging / Deforestation",
+    "infrastructure": "Infrastructure",
+    "agriculture": "Agriculture",
+    "protected_areas": "Protected Areas",
+    "other": "Other",
+    "": "Unclassified",
+}
+EVENT_LABELS = {
+    "pollution": "Pollution",
+    "enforcement_action": "Enforcement Action",
+    "violence": "Violence",
+    "legal": "Legal Action",
+    "consultation_dispute": "Consultation Dispute",
+    "protest": "Protest",
+    "displacement": "Displacement",
+    "": "Unclassified",
+}
+
+
+def pretty_sector(v: str) -> str:
+    v = (v or "").strip()
+    return SECTOR_LABELS.get(v, v.replace("_", " ").title())
+
+
+def pretty_event(v: str) -> str:
+    v = (v or "").strip()
+    return EVENT_LABELS.get(v, v.replace("_", " ").title())
  
  
 # ---------------------------------------------------------------------------
@@ -58,11 +97,12 @@ def load_data(path: str = DATA_PATH) -> pd.DataFrame:
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
  
     # Guarantee the columns the app reads exist, even pre-enrichment.
-    for col in ["country", "sector", "event_type", "environmental_issue",
-                "severity", "urgency", "article_title", "article_url",
-                "source", "llm_summary", "source_text_excerpt", "latitude",
-                "longitude", "date_published", "geocode_precision",
-                "conflict_id", "coverage_count"]:
+    for col in [COUNTRY_COL, REGION_COL, MUNI_COL, SUBDIST_COL, "country",
+                "sector", "event_type", "environmental_issue",
+                "article_title", "article_url", "source", "llm_summary",
+                "source_text_excerpt", "latitude", "longitude",
+                "date_published", "geocode_precision", "conflict_id",
+                "coverage_count"]:
         if col not in df.columns:
             df[col] = ""
  
@@ -79,12 +119,12 @@ def load_data(path: str = DATA_PATH) -> pd.DataFrame:
  
  
 def apply_filters(df: pd.DataFrame, countries=None, sectors=None, events=None,
-                  date_range=None, query: str = "") -> pd.DataFrame:
+                  date_range=None) -> pd.DataFrame:
     """Return the subset of `df` matching the selected filters. Empty/None
     filter values mean 'no constraint'."""
     out = df
     if countries:
-        out = out[out["country"].isin(countries)]
+        out = out[out[COUNTRY_COL].isin(countries)]
     if sectors:
         out = out[out["sector"].isin(sectors)]
     if events:
@@ -92,12 +132,6 @@ def apply_filters(df: pd.DataFrame, countries=None, sectors=None, events=None,
     if date_range and len(date_range) == 2 and date_range[0] and date_range[1]:
         start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
         out = out[(out["date"] >= start) & (out["date"] <= end)]
-    if query:
-        q = query.strip().lower()
-        hay = (out["article_title"].str.lower() + " "
-               + out["summary_display"].str.lower() + " "
-               + out["environmental_issue"].str.lower())
-        out = out[hay.str.contains(q, regex=False, na=False)]
     return out
  
  
@@ -146,9 +180,9 @@ def build_map(df: pd.DataFrame):
         popup_html = (
             f"<b>{_esc(title)}</b><br>"
             f"<small>{_esc(r['source'])} &middot; {date_str} &middot; "
-            f"{_esc(r['country'])}</small><br>"
-            f"<i>{_esc(r['sector'])} / {_esc(r['event_type'])}"
-            f"{(' / severity: ' + _esc(r['severity'])) if r['severity'] else ''}</i>"
+            f"{_esc(r[COUNTRY_COL])}</small><br>"
+            f"<i>{_esc(pretty_sector(r['sector']))} / "
+            f"{_esc(pretty_event(r['event_type']))}</i>"
             f"{cov_line}"
             f"<p>{_esc(summary)}</p>"
             f"<a href='{_esc(url)}' target='_blank'>Read source &rarr;</a>"
@@ -197,14 +231,15 @@ def main() -> None:
  
     # ---- Sidebar filters ----
     st.sidebar.header("Filters")
-    query = st.sidebar.text_input("Search title / summary / issue")
  
     def opts(col):
         return sorted(v for v in df[col].unique() if str(v).strip())
  
-    countries = st.sidebar.multiselect("Country", opts("country"))
-    sectors = st.sidebar.multiselect("Theme / sector", opts("sector"))
-    events = st.sidebar.multiselect("Event type", opts("event_type"))
+    countries = st.sidebar.multiselect("Country", opts(COUNTRY_COL))
+    sectors = st.sidebar.multiselect("Sector", opts("sector"),
+                                     format_func=pretty_sector)
+    events = st.sidebar.multiselect("Event type", opts("event_type"),
+                                    format_func=pretty_event)
  
     dated = df.dropna(subset=["date"])
     if not dated.empty:
@@ -215,13 +250,13 @@ def main() -> None:
         date_range = None
         st.sidebar.caption("No parseable dates yet for a date filter.")
  
-    fdf = apply_filters(df, countries, sectors, events, date_range, query)
+    fdf = apply_filters(df, countries, sectors, events, date_range)
  
     # ---- Headline metrics ----
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Articles shown", len(fdf))
     c2.metric("Unique conflicts", fdf["conflict_id"].replace("", pd.NA).nunique())
-    c3.metric("Countries", fdf["country"].replace("", pd.NA).nunique())
+    c3.metric("Countries", fdf[COUNTRY_COL].replace("", pd.NA).nunique())
     c4.metric("With coordinates", int(fdf[["lat", "lon"]].notna().all(axis=1).sum()))
     if not fdf.dropna(subset=["date"]).empty:
         dd = fdf.dropna(subset=["date"])
@@ -264,15 +299,33 @@ def main() -> None:
  
     # ---- Table ----
     st.subheader("Articles")
-    table_cols = ["conflict_id", "coverage_count", "date_published", "source",
-                  "country", "region_department", "sector", "event_type",
-                  "environmental_issue", "severity", "urgency",
-                  "article_title", "article_url"]
-    table_cols = [c for c in table_cols if c in fdf.columns]
+    show = fdf.copy()
+    show["sector"] = show["sector"].map(pretty_sector)
+    show["event_type"] = show["event_type"].map(pretty_event)
+    table_cols = ["source", "article_title", "article_url", "date_published",
+                  COUNTRY_COL, REGION_COL, MUNI_COL, SUBDIST_COL, "sector",
+                  "event_type", "environmental_issue", "source_text_excerpt",
+                  "coverage_count"]
+    table_cols = [c for c in table_cols if c in show.columns]
+    show = show.sort_values("date", ascending=False)
     st.dataframe(
-        fdf[table_cols].sort_values("date_published", ascending=False),
+        show[table_cols],
         use_container_width=True, hide_index=True,
-        column_config={"article_url": st.column_config.LinkColumn("source url")},
+        column_config={
+            "source": "Source",
+            "article_title": "Title",
+            "article_url": st.column_config.LinkColumn("Source URL"),
+            "date_published": "Date",
+            COUNTRY_COL: "Country",
+            REGION_COL: "Region",
+            MUNI_COL: "Municipality",
+            SUBDIST_COL: "Sub-district",
+            "sector": "Sector",
+            "event_type": "Event type",
+            "environmental_issue": "Environmental issue",
+            "source_text_excerpt": "Excerpt",
+            "coverage_count": "Coverage",
+        },
     )
  
  
