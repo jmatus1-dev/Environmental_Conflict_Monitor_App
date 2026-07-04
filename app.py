@@ -82,6 +82,15 @@ def pretty_sector(v: str) -> str:
 def pretty_event(v: str) -> str:
     v = (v or "").strip()
     return EVENT_LABELS.get(v, v.replace("_", " ").title())
+
+
+# Rough precision ranking, so when a conflict's articles have different
+# coordinates we put the single marker on the most precise one.
+_PRECISION_RANK = {
+    "town": 3, "village": 3, "suburb": 3, "quarter": 3, "hamlet": 3,
+    "locality": 3, "amenity": 3, "office": 3, "tourism": 3,
+    "feature": 2, "region": 1, "country": 0,
+}
  
  
 # ---------------------------------------------------------------------------
@@ -168,32 +177,67 @@ def build_map(df: pd.DataFrame):
  
     marker_layer = MarkerCluster(name="Conflict markers")
     heat_points = []
-    for _, r in mapped.iterrows():
-        color = SECTOR_COLORS.get(r["sector"], "gray")
-        title = (r["article_title"] or "")[:120]
-        summary = (r["summary_display"] or "")[:300]
-        url = r["article_url"]
-        date_str = r["date"].date().isoformat() if pd.notna(r["date"]) else "unknown date"
-        cov = int(r["coverage"]) if pd.notna(r["coverage"]) else 1
-        cov_line = (f"<br><b>Reported by {cov} articles</b>"
-                    if cov > 1 else "")
-        popup_html = (
-            f"<b>{_esc(title)}</b><br>"
-            f"<small>{_esc(r['source'])} &middot; {date_str} &middot; "
-            f"{_esc(r[COUNTRY_COL])}</small><br>"
-            f"<i>{_esc(pretty_sector(r['sector']))} / "
-            f"{_esc(pretty_event(r['event_type']))}</i>"
-            f"{cov_line}"
-            f"<p>{_esc(summary)}</p>"
-            f"<a href='{_esc(url)}' target='_blank'>Read source &rarr;</a>"
-        )
+    # Group articles by conflict so ONE marker can link to all of them. Rows
+    # with no conflict_id are each treated as their own single-article group.
+    mapped = mapped.reset_index(drop=True)
+    cid = mapped["conflict_id"].astype(str).str.strip()
+    mapped["_gid"] = cid.where(cid != "", other="__row" + mapped.index.astype(str))
+
+    for _gid, grp in mapped.groupby("_gid", sort=False):
+        # Put the marker on the group's most precise coordinate.
+        ranks = grp["geocode_precision"].map(
+            lambda p: _PRECISION_RANK.get(str(p).strip().lower(), 2))
+        rep_row = grp.loc[ranks.idxmax()]
+        color = SECTOR_COLORS.get(rep_row["sector"], "gray")
+        loc_bits = " &middot; ".join(
+            _esc(x) for x in [rep_row[COUNTRY_COL], rep_row[REGION_COL]]
+            if str(x).strip())
+        sector_line = (f"{_esc(pretty_sector(rep_row['sector']))} / "
+                       f"{_esc(pretty_event(rep_row['event_type']))}")
+        n = len(grp)
+
+        if n == 1:
+            r0 = grp.iloc[0]
+            date_str = (r0["date"].date().isoformat()
+                        if pd.notna(r0["date"]) else "unknown date")
+            popup_html = (
+                f"<b>{_esc((r0['article_title'] or '')[:120])}</b><br>"
+                f"<small>{_esc(r0['source'])} &middot; {date_str} &middot; "
+                f"{loc_bits}</small><br>"
+                f"<i>{sector_line}</i>"
+                f"<p style='margin:6px 0'>"
+                f"{_esc((r0['summary_display'] or '')[:280])}</p>"
+                f"<a href='{_esc(r0['article_url'])}' target='_blank'>"
+                f"Read source &rarr;</a>"
+            )
+        else:
+            items = []
+            for _, a in grp.sort_values("date", ascending=False).iterrows():
+                d = (a["date"].date().isoformat()
+                     if pd.notna(a["date"]) else "unknown date")
+                items.append(
+                    f"<li style='margin-bottom:6px'>"
+                    f"<a href='{_esc(a['article_url'])}' target='_blank'>"
+                    f"{_esc(a['source'])} &middot; {d}</a><br>"
+                    f"<small>{_esc((a['article_title'] or '')[:90])}</small></li>"
+                )
+            popup_html = (
+                f"<b>Conflict &middot; {n} articles</b><br>"
+                f"<small>{loc_bits} &middot; <i>{sector_line}</i></small>"
+                f"<ul style='padding-left:18px;margin:6px 0'>"
+                f"{''.join(items)}</ul>"
+            )
+
+        tooltip = (rep_row["article_title"] or "")[:110]
+        if n > 1:
+            tooltip = f"{n} articles · {tooltip}"
         folium.Marker(
-            location=[r["lat"], r["lon"]],
-            popup=folium.Popup(popup_html, max_width=320),
-            tooltip=title,
+            location=[rep_row["lat"], rep_row["lon"]],
+            popup=folium.Popup(popup_html, max_width=340),
+            tooltip=tooltip,
             icon=folium.Icon(color=color, icon="info-sign"),
         ).add_to(marker_layer)
-        heat_points.append([r["lat"], r["lon"]])
+        heat_points.append([rep_row["lat"], rep_row["lon"]])
  
     marker_layer.add_to(fmap)
     if heat_points:
