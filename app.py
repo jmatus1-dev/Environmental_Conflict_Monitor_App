@@ -144,14 +144,17 @@ def apply_filters(df: pd.DataFrame, countries=None, sectors=None, events=None,
     return out
  
  
-def monthly_counts(df: pd.DataFrame) -> pd.DataFrame:
-    """Counts per month per theme, for the time-series chart. Rows without a
-    parseable date are dropped."""
+def yearly_counts(df: pd.DataFrame) -> pd.DataFrame:
+    """Counts per YEAR per theme, for the time-series chart. Yearly (not
+    monthly) buckets keep the chart readable across a multi-year span and when
+    a sparse filter is applied. Rows without a parseable date are dropped, and
+    the theme is given its human-readable label for the legend."""
     d = df.dropna(subset=["date"]).copy()
     if d.empty:
-        return pd.DataFrame(columns=["month", "theme", "count"])
-    d["month"] = d["date"].dt.to_period("M").dt.to_timestamp()
-    g = (d.groupby(["month", "theme"]).size().reset_index(name="count"))
+        return pd.DataFrame(columns=["year", "theme", "count"])
+    d["year"] = d["date"].dt.year
+    g = d.groupby(["year", "theme"]).size().reset_index(name="count")
+    g["theme"] = g["theme"].map(pretty_sector)
     return g
  
  
@@ -329,15 +332,18 @@ def main() -> None:
  
     # ---- Time series ----
     st.subheader("Conflict frequency over time")
-    mc = monthly_counts(fdf)
-    if mc.empty:
+    yc = yearly_counts(fdf)
+    if yc.empty:
         st.caption("No dated rows in the current selection.")
     else:
-        chart = (alt.Chart(mc).mark_bar().encode(
-            x=alt.X("month:T", title="Year"),
-            y=alt.Y("count:Q", title="Articles"),
+        chart = (alt.Chart(yc).mark_bar().encode(
+            x=alt.X("year:O", title="Year"),
+            y=alt.Y("count:Q", title="Articles",
+                    axis=alt.Axis(tickMinStep=1, format="d")),
             color=alt.Color("theme:N", title="Theme"),
-            tooltip=["month:T", "theme:N", "count:Q"],
+            tooltip=[alt.Tooltip("year:O", title="Year"),
+                     alt.Tooltip("theme:N", title="Theme"),
+                     alt.Tooltip("count:Q", title="Articles")],
         ).properties(height=280))
         st.altair_chart(chart, use_container_width=True)
  
