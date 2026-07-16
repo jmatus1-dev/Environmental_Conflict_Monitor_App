@@ -11,7 +11,14 @@ geocode) and renders:
   * headline metrics and a time-series chart of conflict frequency over time;
   * a download button that exports the current filtered selection as CSV;
   * the filtered data as a table.
- 
+
+It also has an ADMIN MODE (sidebar toggle). When on, an extra "Setup & Run"
+view appears where an admin configures a new satellite analysis: time frame,
+conflict location (from the mapped database OR manual coordinates),
+extractive industry, and report language. The Run Analysis button is a shell
+for now — the Phase 2 satellite pipeline it will eventually trigger has not
+been built yet.
+
 It degrades gracefully: if you open it before running the LLM/geocoding steps,
 the charts, filters and table still work; only the map needs coordinates and
 it'll tell you how many rows have them.
@@ -28,6 +35,7 @@ Run
 from __future__ import annotations
  
 import os
+from datetime import date, timedelta
 import pandas as pd
  
 DATA_PATH = os.environ.get("ENVCONFLICT_DATA", os.path.join("data", "combined.csv"))
@@ -257,6 +265,182 @@ def _esc(s) -> str:
  
  
 # ---------------------------------------------------------------------------
+# Admin Mode: Setup & Run panel
+# ---------------------------------------------------------------------------
+#
+# This is a UI shell for Phase 2. It captures the five inputs Hernando spec'd
+# (time frame, location, industry, language) and validates them, but the
+# button that would kick off the satellite pipeline just shows a "coming soon"
+# message and echoes the captured configuration. Once the Planetary Computer
+# pipeline and Quarto slide-deck generator are built, we swap that stub for
+# a real subprocess call.
+#
+ 
+def render_admin_mode(df: pd.DataFrame) -> None:
+    """Draw the admin panel where a user configures a new satellite analysis."""
+    import streamlit as st
+
+    st.header("Setup & Run — New Satellite Analysis")
+    st.caption(
+        "Configure a conflict location and time frame. When Phase 2 is wired "
+        "up, clicking **Run Analysis** will download imagery from the "
+        "Microsoft Planetary Computer, compute the nine environmental "
+        "indicators, and produce a PDF slide deck."
+    )
+
+    # --- 1. Time frame -------------------------------------------------------
+    st.subheader("1. Time frame")
+    default_start = date.today() - timedelta(days=365 * 5)
+    c1, c2 = st.columns(2)
+    start_date = c1.date_input("Start date", value=default_start)
+    end_date = c2.date_input("End date", value=date.today())
+
+    # --- 2. Conflict location ------------------------------------------------
+    st.subheader("2. Conflict location")
+    loc_mode = st.radio(
+        "Location source",
+        ["Pick from mapped conflicts in the database",
+         "Enter coordinates manually (unmapped conflict)"],
+        label_visibility="collapsed",
+    )
+
+    latitude: float | None = None
+    longitude: float | None = None
+    location_label = ""
+    conflict_id: str | None = None
+
+    if loc_mode.startswith("Pick"):
+        # Cascade dropdowns: Country -> Region -> Municipality.
+        # Only rows with real coordinates AND a country are pickable.
+        mapped = df.dropna(subset=["lat", "lon"]).copy()
+        mapped = mapped[mapped[COUNTRY_COL].str.strip() != ""]
+
+        if mapped.empty:
+            st.warning(
+                "No geocoded conflicts in the database yet. Run "
+                "`python3 run_all.py` first so `geocode.py` can populate "
+                "coordinates."
+            )
+        else:
+            countries = sorted(mapped[COUNTRY_COL].unique())
+            country = st.selectbox("Country", ["— select —"] + countries)
+
+            if country != "— select —":
+                sub = mapped[mapped[COUNTRY_COL] == country]
+                regions = sorted(
+                    r for r in sub[REGION_COL].unique() if str(r).strip()
+                )
+                region = st.selectbox(
+                    "Region (admin 1)", ["— select —"] + regions
+                )
+
+                if region != "— select —":
+                    sub = sub[sub[REGION_COL] == region]
+                    munis = sorted(
+                        m for m in sub[MUNI_COL].unique() if str(m).strip()
+                    )
+                    muni = st.selectbox(
+                        "Municipality (admin 2)", ["— select —"] + munis
+                    )
+
+                    if muni != "— select —":
+                        sub = sub[sub[MUNI_COL] == muni]
+                        if not sub.empty:
+                            row = sub.iloc[0]
+                            latitude = float(row["lat"])
+                            longitude = float(row["lon"])
+                            location_label = f"{muni}, {region}, {country}"
+                            conflict_id = str(row.get("conflict_id", "")) or None
+                            st.success(
+                                f"**{location_label}**  \n"
+                                f"Coordinates: {latitude:.4f}, {longitude:.4f}  \n"
+                                f"Conflict ID: `{conflict_id or 'n/a'}`"
+                            )
+    else:
+        c1, c2 = st.columns(2)
+        latitude = c1.number_input(
+            "Latitude", value=0.0, format="%.6f",
+            min_value=-90.0, max_value=90.0,
+        )
+        longitude = c2.number_input(
+            "Longitude", value=0.0, format="%.6f",
+            min_value=-180.0, max_value=180.0,
+        )
+        location_label = st.text_input(
+            "Location label (optional)",
+            placeholder="e.g. Cerrejón mine, La Guajira",
+        )
+
+    # --- 3. Industry ---------------------------------------------------------
+    st.subheader("3. Extractive industry type")
+    # Use the same coded sector list the rest of the app uses, minus the
+    # empty/"other" catch-alls which don't make sense as an analysis target.
+    industry_keys = [k for k in SECTOR_LABELS.keys() if k and k != "other"]
+    industry = st.selectbox(
+        "Industry",
+        industry_keys,
+        format_func=pretty_sector,
+    )
+
+    # --- 4. Language ---------------------------------------------------------
+    st.subheader("4. Report language")
+    language = st.radio(
+        "Language", ["English", "Spanish"], horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    # --- 5. Run --------------------------------------------------------------
+    st.subheader("5. Run analysis")
+    run_clicked = st.button("▶  Run Analysis", type="primary")
+
+    if run_clicked:
+        # Validate before doing anything.
+        errors = []
+        if start_date >= end_date:
+            errors.append("End date must be after start date.")
+        if latitude is None or longitude is None:
+            errors.append("Please pick or enter a location.")
+        elif loc_mode.startswith("Enter") and latitude == 0.0 and longitude == 0.0:
+            errors.append(
+                "Coordinates (0, 0) look like a placeholder — "
+                "please enter real values."
+            )
+
+        if errors:
+            for e in errors:
+                st.error(e)
+        else:
+            st.info(
+                "🚧  **Coming soon.**  The satellite pipeline is not yet "
+                "built. Once Phase 2 is wired up, this button will:\n\n"
+                "1. Download Sentinel-2 and rainfall data from the Microsoft "
+                "Planetary Computer for the selected date range and location\n"
+                "2. Compute the nine indicators (NDVI, EVI2, SAVI, NDMI, "
+                "NDWI, MNDWI, NDBI, BSI, and Rainfall)\n"
+                "3. Generate a time-series chart and a map for each indicator\n"
+                "4. Render a Quarto PDF slide deck in the chosen language"
+            )
+
+            with st.expander("Configuration captured", expanded=True):
+                st.json({
+                    "time_frame": {
+                        "start_date": str(start_date),
+                        "end_date": str(end_date),
+                    },
+                    "location": {
+                        "mode": ("database" if loc_mode.startswith("Pick")
+                                 else "manual"),
+                        "label": location_label,
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "conflict_id": conflict_id,
+                    },
+                    "industry": pretty_sector(industry),
+                    "language": language,
+                })
+
+
+# ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
  
@@ -275,8 +459,33 @@ def main() -> None:
         st.stop()
  
     df = load_data(DATA_PATH)
- 
-    # ---- Sidebar filters ----
+
+    # ---- Sidebar: Admin toggle + mode picker --------------------------------
+    # When Admin is OFF the app looks exactly like the old viewer.
+    # When Admin is ON a second radio option appears that swaps the main area
+    # over to the Setup & Run panel.
+    st.sidebar.header("Mode")
+    is_admin = st.sidebar.toggle(
+        "Admin Mode",
+        value=False,
+        help="Turn on to configure and launch a new satellite analysis.",
+    )
+    if is_admin:
+        mode = st.sidebar.radio(
+            "View",
+            ["📊 View Results", "⚙️ Setup & Run"],
+            label_visibility="collapsed",
+        )
+    else:
+        mode = "📊 View Results"
+    st.sidebar.markdown("---")
+
+    # ---- Admin Setup & Run: replaces the whole main area --------------------
+    if mode == "⚙️ Setup & Run":
+        render_admin_mode(df)
+        return
+
+    # ---- View Results (the original viewer, unchanged) ---------------------
     st.sidebar.header("Filters")
  
     def opts(col):
