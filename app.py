@@ -312,6 +312,11 @@ def render_admin_mode(df: pd.DataFrame) -> None:
     if loc_mode.startswith("Pick"):
         # Cascade dropdowns: Country -> Region -> Municipality.
         # Only rows with real coordinates AND a country are pickable.
+        # The user can stop at any level; coordinates get assigned from the
+        # most-precisely-geocoded row in whatever subset they've narrowed to.
+        # (This matters because match_admin.py deliberately leaves deeper
+        # admin fields blank when the geocode isn't precise enough — so many
+        # conflicts have country + region but no municipality.)
         mapped = df.dropna(subset=["lat", "lon"]).copy()
         mapped = mapped[mapped[COUNTRY_COL].str.strip() != ""]
 
@@ -325,37 +330,86 @@ def render_admin_mode(df: pd.DataFrame) -> None:
             countries = sorted(mapped[COUNTRY_COL].unique())
             country = st.selectbox("Country", ["— select —"] + countries)
 
+            region = "— select —"
+            muni = "— select —"
+            sub = None
+
             if country != "— select —":
                 sub = mapped[mapped[COUNTRY_COL] == country]
                 regions = sorted(
                     r for r in sub[REGION_COL].unique() if str(r).strip()
                 )
-                region = st.selectbox(
-                    "Region (admin 1)", ["— select —"] + regions
-                )
+
+                if regions:
+                    region = st.selectbox(
+                        "Region (admin 1)", ["— select —"] + regions
+                    )
+                else:
+                    st.caption(
+                        "No region-level data available for this country — "
+                        "coordinates will be picked from the country level."
+                    )
 
                 if region != "— select —":
                     sub = sub[sub[REGION_COL] == region]
                     munis = sorted(
                         m for m in sub[MUNI_COL].unique() if str(m).strip()
                     )
-                    muni = st.selectbox(
-                        "Municipality (admin 2)", ["— select —"] + munis
-                    )
+
+                    if munis:
+                        muni = st.selectbox(
+                            "Municipality (admin 2)", ["— select —"] + munis
+                        )
+                    else:
+                        st.caption(
+                            "No municipality-level data available for this "
+                            "region — coordinates will be picked from the "
+                            "region level."
+                        )
 
                     if muni != "— select —":
                         sub = sub[sub[MUNI_COL] == muni]
-                        if not sub.empty:
-                            row = sub.iloc[0]
-                            latitude = float(row["lat"])
-                            longitude = float(row["lon"])
-                            location_label = f"{muni}, {region}, {country}"
-                            conflict_id = str(row.get("conflict_id", "")) or None
-                            st.success(
-                                f"**{location_label}**  \n"
-                                f"Coordinates: {latitude:.4f}, {longitude:.4f}  \n"
-                                f"Conflict ID: `{conflict_id or 'n/a'}`"
-                            )
+
+            # Assign coordinates at whatever depth the user reached. We pick
+            # the row in the current subset with the most precise geocode
+            # (via the same _PRECISION_RANK the map uses) so the coordinate
+            # always points at a real, specific place.
+            if sub is not None and not sub.empty:
+                ranks = sub["geocode_precision"].map(
+                    lambda p: _PRECISION_RANK.get(str(p).strip().lower(), 2)
+                )
+                row = sub.loc[ranks.idxmax()]
+                latitude = float(row["lat"])
+                longitude = float(row["lon"])
+                conflict_id = str(row.get("conflict_id", "")) or None
+                article_title = str(row.get("article_title", "") or "")[:80]
+
+                if muni != "— select —":
+                    depth = "municipality"
+                    location_label = f"{muni}, {region}, {country}"
+                elif region != "— select —":
+                    depth = "region"
+                    location_label = f"{region}, {country}"
+                else:
+                    depth = "country"
+                    location_label = country
+
+                st.success(
+                    f"**{location_label}**  \n"
+                    f"Coordinates: {latitude:.4f}, {longitude:.4f} "
+                    f"(selected at *{depth}* level)  \n"
+                    f"Source article: _{article_title or 'n/a'}_  \n"
+                    f"Conflict ID: `{conflict_id or 'n/a'}`"
+                )
+
+                if depth == "country":
+                    st.warning(
+                        "Only country-level selection reached. The "
+                        "coordinates above come from one specific article "
+                        "and may be far from the conflict you have in mind. "
+                        "Narrow down by region or municipality if you can, "
+                        "or use the manual coordinate option instead."
+                    )
     else:
         c1, c2 = st.columns(2)
         latitude = c1.number_input(
