@@ -370,45 +370,102 @@ def render_admin_mode(df: pd.DataFrame) -> None:
                     if muni != "— select —":
                         sub = sub[sub[MUNI_COL] == muni]
 
-            # Assign coordinates at whatever depth the user reached. We pick
-            # the row in the current subset with the most precise geocode
-            # (via the same _PRECISION_RANK the map uses) so the coordinate
-            # always points at a real, specific place.
+            # Assign coordinates by letting the user pick a specific conflict
+            # from whatever subset they've narrowed to. Multiple conflicts can
+            # share the same country/region/municipality, so this final step is
+            # what actually pins down the analysis location.
             if sub is not None and not sub.empty:
-                ranks = sub["geocode_precision"].map(
-                    lambda p: _PRECISION_RANK.get(str(p).strip().lower(), 2)
+                # Group by conflict_id so each conflict shows up once (rows
+                # without a conflict_id are treated as their own group).
+                sub = sub.copy().reset_index(drop=True)
+                cid = sub["conflict_id"].astype(str).str.strip()
+                sub["_gid"] = cid.where(
+                    cid != "", other="__row" + sub.index.astype(str)
                 )
-                row = sub.loc[ranks.idxmax()]
+
+                conflicts = []
+                for gid, grp in sub.groupby("_gid", sort=False):
+                    # Pick the most-precisely-geocoded row as the conflict's
+                    # representative — same logic the map uses.
+                    ranks = grp["geocode_precision"].map(
+                        lambda p: _PRECISION_RANK.get(
+                            str(p).strip().lower(), 2
+                        )
+                    )
+                    rep = grp.loc[ranks.idxmax()]
+                    title = str(rep.get("article_title", "") or "").strip()
+                    if not title:
+                        title = "(no article title)"
+                    title = title[:75]
+                    # Location tag: municipality first, then region.
+                    loc_bits = []
+                    m_val = str(rep.get(MUNI_COL, "")).strip()
+                    r_val = str(rep.get(REGION_COL, "")).strip()
+                    if m_val:
+                        loc_bits.append(m_val)
+                    if r_val and r_val != m_val:
+                        loc_bits.append(r_val)
+                    loc_str = ", ".join(loc_bits)
+                    n_articles = len(grp)
+                    cov_str = (
+                        f" · {n_articles} articles" if n_articles > 1 else ""
+                    )
+                    label = title
+                    if loc_str:
+                        label = f"{title} — {loc_str}"
+                    label = f"{label}{cov_str}"
+                    conflicts.append({"label": label, "row": rep})
+
+                # Sort by label so the picker is stable and skimmable.
+                conflicts.sort(key=lambda c: c["label"].lower())
+
+                if len(conflicts) > 1:
+                    idx = st.selectbox(
+                        f"Specific conflict ({len(conflicts)} in this area)",
+                        range(len(conflicts)),
+                        format_func=lambda i: conflicts[i]["label"],
+                    )
+                    chosen = conflicts[idx]
+                else:
+                    chosen = conflicts[0]
+                    st.caption(
+                        "Only one conflict in this area — auto-selected."
+                    )
+
+                row = chosen["row"]
                 latitude = float(row["lat"])
                 longitude = float(row["lon"])
                 conflict_id = str(row.get("conflict_id", "")) or None
                 article_title = str(row.get("article_title", "") or "")[:80]
+                precision = str(row.get("geocode_precision", "")).strip().lower()
 
                 if muni != "— select —":
-                    depth = "municipality"
                     location_label = f"{muni}, {region}, {country}"
                 elif region != "— select —":
-                    depth = "region"
                     location_label = f"{region}, {country}"
                 else:
-                    depth = "country"
                     location_label = country
 
                 st.success(
                     f"**{location_label}**  \n"
                     f"Coordinates: {latitude:.4f}, {longitude:.4f} "
-                    f"(selected at *{depth}* level)  \n"
+                    f"(geocoded at *{precision or 'unknown'}* precision)  \n"
                     f"Source article: _{article_title or 'n/a'}_  \n"
                     f"Conflict ID: `{conflict_id or 'n/a'}`"
                 )
 
-                if depth == "country":
+                # Warn based on the actual geocode precision of the chosen
+                # conflict, not just how deep the cascade went — a conflict
+                # can be picked specifically but still only be geocoded at
+                # country or region level, which is too coarse for satellite
+                # analysis.
+                if precision in ("country", "region", ""):
                     st.warning(
-                        "Only country-level selection reached. The "
-                        "coordinates above come from one specific article "
-                        "and may be far from the conflict you have in mind. "
-                        "Narrow down by region or municipality if you can, "
-                        "or use the manual coordinate option instead."
+                        "The coordinates for this conflict are only "
+                        f"geocoded at *{precision or 'unknown'}* precision, "
+                        "which is likely too coarse for satellite analysis. "
+                        "Consider using the manual coordinate option to "
+                        "enter a specific point."
                     )
     else:
         c1, c2 = st.columns(2)
