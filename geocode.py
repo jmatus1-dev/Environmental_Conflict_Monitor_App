@@ -143,6 +143,23 @@ def _precision_of(raw: dict) -> str:
     return addrtype or "unknown"
 
 
+# Query-level hints that mean "we only knew the region/country". A result for
+# such a query can never honestly be more precise than the query itself.
+COARSE_HINTS = ("region", "country")
+
+
+def _cap_precision(precision: str, hint: str) -> str:
+    """Never record a precision more specific than what we asked for.
+
+    If the query was only region- or country-level (e.g. "Cusco, Peru"),
+    Nominatim may still match a town or a river and report a precise-looking
+    type. Recording that would be a false precision label, so we cap it at
+    the hint. This keeps `geocode_precision` honest about what we knew."""
+    if hint in COARSE_HINTS:
+        return hint
+    return precision
+
+
 # ---------------------------------------------------------------------------
 # Choosing what string to geocode for a row
 # ---------------------------------------------------------------------------
@@ -209,7 +226,7 @@ def geocode_dataset(in_path: str, geocoder: Geocoder, limit, country_fallback: b
             continue
         row["latitude"] = f"{res['lat']:.6f}"
         row["longitude"] = f"{res['lon']:.6f}"
-        row["geocode_precision"] = res.get("precision", hint)
+        row["geocode_precision"] = _cap_precision(res.get("precision", hint), hint)
         row["geocode_query"] = res.get("query", query)
         row["geocode_display_name"] = res.get("display_name", "")
         row["geocode_status"] = "ok"
