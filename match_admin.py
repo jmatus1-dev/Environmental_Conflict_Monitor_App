@@ -91,21 +91,34 @@ def _strip_accents(s: str) -> str:
                    if unicodedata.category(c) != "Mn")
 
 
-def _appears_capitalized(name: str, original_text: str) -> bool:
-    """True if `name` appears in `original_text` as a proper noun: a whole-word,
-    accent-insensitive occurrence whose first letter is capitalized in the
-    original text. This rejects 'piedras' (stones, lowercase) while keeping
+def _capitalized_positions(name: str, original_text: str) -> list:
+    """Character positions of every proper-noun occurrence of `name` in
+    `original_text` (whole-word, accent-insensitive, capitalized in the
+    original). This rejects 'piedras' (stones, lowercase) while keeping
     'Piedras' (the town, capitalized)."""
     if not name or not original_text:
-        return False
+        return []
     text_noacc = _strip_accents(original_text)
     name_noacc = _strip_accents(name)
     # Accent-stripping preserves character positions for Latin text, so match
     # offsets in text_noacc map back to original_text 1:1.
+    positions = []
     for m in re.finditer(rf"\b{re.escape(name_noacc)}\b", text_noacc, re.IGNORECASE):
         if original_text[m.start():m.start() + 1].isupper():
-            return True
-    return False
+            positions.append(m.start())
+    return positions
+
+
+def _first_capitalized_pos(name: str, original_text: str):
+    """Position of the first proper-noun occurrence, or None."""
+    positions = _capitalized_positions(name, original_text)
+    return positions[0] if positions else None
+
+
+def _appears_capitalized(name: str, original_text: str) -> bool:
+    """True if `name` appears in `original_text` as a proper noun (see
+    `_capitalized_positions`)."""
+    return bool(_capitalized_positions(name, original_text))
 
 
 class GadmIndex:
@@ -210,26 +223,45 @@ def _resolve_by_text(row, index, iso3):
     if gdf2 is None or "NAME_2" not in gdf2.columns or "GID_2" not in gdf2.columns:
         return None
 
-    region = (row.get("region_department") or "").strip()
+    region = (row.get("region_department") or row.get(COL_A1) or "").strip()
+    region_filtered = False
     if region and "NAME_1" in gdf2.columns:
         region_norm = _normalize(region)
         mask = gdf2["NAME_1"].apply(lambda n: _normalize(n) == region_norm)
-        candidates = gdf2[mask] if mask.any() else gdf2
+        if mask.any():
+            candidates = gdf2[mask]
+            region_filtered = True
+        else:
+            candidates = gdf2
     else:
         candidates = gdf2
 
-    # Collect names that appear capitalized in the text; prefer the longest.
+    # Names of countries can also be municipality names (there is a Brazilian
+    # town literally called "Colômbia"); never match those, since the text
+    # mention is almost certainly about the country.
+    country_names = {_normalize(c) for c in COUNTRY_TO_ISO3}
+
+    # Collect names that appear capitalized in the text; prefer the one
+    # mentioned FIRST — articles almost always lead with their primary
+    # location. When no region narrows the pool, the whole country's
+    # municipalities are candidates and single mentions are unreliable
+    # (surnames like "Silva" or "Cruz" are also town names), so we then
+    # require the name to appear at least twice.
+    min_mentions = 1 if region_filtered else 2
     hits = []
     for r in candidates.itertuples():
         name = str(r.NAME_2)
         if len(_normalize(name)) < 4:        # avoid tiny ambiguous names
             continue
-        if _appears_capitalized(name, original):
-            hits.append((name, str(r.GID_2)))
+        if _normalize(name) in country_names:
+            continue
+        positions = _capitalized_positions(name, original)
+        if len(positions) >= min_mentions:
+            hits.append((positions[0], name, str(r.GID_2)))
     if not hits:
         return None
-    hits.sort(key=lambda x: (-len(x[0]), x[0]))
-    a2, gid2 = hits[0]
+    hits.sort()
+    _, a2, gid2 = hits[0]
 
     if iso3 not in HAS_ADMIN_3:
         return (a2, "", gid2)
@@ -244,12 +276,15 @@ def _resolve_by_text(row, index, iso3):
         name = str(r.NAME_3)
         if len(_normalize(name)) < 4:
             continue
-        if _appears_capitalized(name, original):
-            sub_hits.append((name, str(r.GID_3)))
+        if _normalize(name) in country_names:
+            continue
+        positions = _capitalized_positions(name, original)
+        if positions:
+            sub_hits.append((positions[0], name, str(r.GID_3)))
     if not sub_hits:
         return (a2, "", gid2)
-    sub_hits.sort(key=lambda x: (-len(x[0]), x[0]))
-    a3, gid3 = sub_hits[0]
+    sub_hits.sort()
+    _, a3, gid3 = sub_hits[0]
     return (a2, a3, gid3)
 
 
@@ -257,18 +292,50 @@ def _resolve_by_text(row, index, iso3):
 # Per-row resolution with cross-checks
 # ---------------------------------------------------------------------------
 
+# Precisions whose coordinates can't honestly pin a municipality. "feature"
+# is included because features like rivers or parks span huge areas — a point
+# somewhere on the Amazon River says nothing about which town is involved.
+COARSE_PRECISIONS = {"region", "country", "state", "feature", "unknown", ""}
+
+
+def _effective_precision(row) -> str:
+    """The row's geocode_precision, downgraded when the stored geocode_query
+    shows we only ever asked at region or country level.
+
+    This repairs rows labeled before the honest-precision fix in geocode.py:
+    e.g. a row whose query was just "Cusco, Peru" may carry precision "town"
+    because Nominatim matched the city, but we never actually knew a town."""
+    prec = (row.get("geocode_precision") or "").strip().lower()
+    query = _normalize(row.get("geocode_query") or "")
+    country = _normalize(row.get("country") or row.get(COL_A0) or "")
+    region = _normalize(row.get("region_department") or row.get(COL_A1) or "")
+    if query and country:
+        if query == country:
+            return "country"
+        if region and query in (f"{region}, {country}", region):
+            return "region"
+    return prec
+
+
 def _resolve_row(row, index):
-    """Return (admin2, admin3, gid). Tries point-in-polygon first, then a
-    capitalization-checked text scan. Cross-checks the result against the
-    row's own country/region; blanks out anything inconsistent."""
-    country = (row.get("country") or "").strip()
+    """Return (admin2, admin3, gid). Coordinates are only trusted for
+    point-in-polygon when the geocode is genuinely specific; region- or
+    country-level rows go straight to the capitalization-checked text scan.
+    Cross-checks the result against the row's own country/region; blanks out
+    anything inconsistent."""
+    country = (row.get("country") or row.get(COL_A0) or "").strip()
     iso3 = COUNTRY_TO_ISO3.get(country)
     if not iso3:
         return ("", "", "")
 
-    result = _resolve_by_point(row, index, iso3)
-    if result is None:
+    if _effective_precision(row) in COARSE_PRECISIONS:
+        # Coordinates are just a region/country centroid (or a mismatched
+        # feature); a point lookup would invent precision we don't have.
         result = _resolve_by_text(row, index, iso3)
+    else:
+        result = _resolve_by_point(row, index, iso3)
+        if result is None:
+            result = _resolve_by_text(row, index, iso3)
     if result is None:
         return ("", "", "")
 
@@ -297,7 +364,10 @@ def _needs_match(row, refetch):
     if not has_text and not has_coords:
         return False
     if row.get(COL_GID) and not refetch:
-        return False
+        # Rows whose municipality came from coarse (region/country-level)
+        # coordinates under the old rules are re-evaluated so the honest
+        # text-scan result replaces — or clears — the stale assignment.
+        return _effective_precision(row) in COARSE_PRECISIONS
     return True
 
 
@@ -313,23 +383,25 @@ def match_admin(path, limit=None, refetch=False):
     matched = 0
     for i, row in enumerate(todo, 1):
         a2, a3, gid = _resolve_row(row, index)
-        # Always populate the clean admin 0 / admin 1 from existing data.
-        row[COL_A0] = (row.get("country") or "").strip()
-        row[COL_A1] = (row.get("region_department") or "").strip()
+        # Populate the clean admin 0 / admin 1 from the raw scraper columns
+        # when present, otherwise KEEP the existing clean values (running on
+        # an already-finalized CSV must never wipe country/region).
+        row[COL_A0] = (row.get("country") or row.get(COL_A0) or "").strip()
+        row[COL_A1] = (row.get("region_department") or row.get(COL_A1) or "").strip()
         row[COL_A2] = a2
         row[COL_A3] = a3
         row[COL_GID] = gid
         if gid:
             matched += 1
         logging.info("[%d/%d] %-10s a1=%-18s a2=%-22s a3=%-15s",
-                     i, len(todo), (row.get("country") or "")[:10],
-                     (row.get("region_department") or "-")[:18],
+                     i, len(todo), (row.get(COL_A0) or "")[:10],
+                     (row.get(COL_A1) or "-")[:18],
                      (a2 or "-")[:22], (a3 or "-")[:15])
 
     # Make sure every row has the clean columns, and drop the old messy ones.
     for row in rows:
-        row[COL_A0] = row.get(COL_A0, (row.get("country") or "").strip())
-        row[COL_A1] = row.get(COL_A1, (row.get("region_department") or "").strip())
+        row[COL_A0] = (row.get("country") or row.get(COL_A0) or "").strip()
+        row[COL_A1] = (row.get("region_department") or row.get(COL_A1) or "").strip()
         row.setdefault(COL_A2, "")
         row.setdefault(COL_A3, "")
         row.setdefault(COL_GID, "")
