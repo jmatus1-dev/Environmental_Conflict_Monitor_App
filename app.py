@@ -119,7 +119,7 @@ def load_data(path: str = DATA_PATH) -> pd.DataFrame:
                 "article_title", "article_url", "source", "llm_summary",
                 "source_text_excerpt", "latitude", "longitude",
                 "date_published", "geocode_precision", "conflict_id",
-                "coverage_count"]:
+                "coverage_count", "gadm_id"]:
         if col not in df.columns:
             df[col] = ""
  
@@ -268,12 +268,16 @@ def _esc(s) -> str:
 # Admin Mode: Setup & Run panel
 # ---------------------------------------------------------------------------
 #
-# This is a UI shell for Phase 2. It captures the five inputs Hernando spec'd
-# (time frame, location, industry, language) and validates them, but the
-# button that would kick off the satellite pipeline just shows a "coming soon"
-# message and echoes the captured configuration. Once the Planetary Computer
-# pipeline and Quarto slide-deck generator are built, we swap that stub for
-# a real subprocess call.
+# Captures the five inputs Hernando spec'd (time frame, location, industry,
+# language), validates them, and — when running LOCALLY with a conflict
+# picked from the database — actually runs the satellite pipeline by calling
+# satellite_pilot.run_analysis(). Progress streams into the page and the 8
+# index plots are shown when it finishes.
+#
+# Two cases still show a message instead of running:
+#   * manual coordinates (no GADM polygon to clip to — coming soon), and
+#   * the deployed Streamlit Cloud copy (no geo libraries / shapefiles
+#     there; analysis is laptop-only by design).
 #
  
 def render_admin_mode(df: pd.DataFrame) -> None:
@@ -308,6 +312,8 @@ def render_admin_mode(df: pd.DataFrame) -> None:
     longitude: float | None = None
     location_label = ""
     conflict_id: str | None = None
+    gadm_id: str | None = None
+    article_date: str | None = None  # "YYYY-MM" of the source article
 
     if loc_mode.startswith("Pick"):
         # Cascade dropdowns: Country -> Region -> Municipality.
@@ -436,8 +442,13 @@ def render_admin_mode(df: pd.DataFrame) -> None:
                 latitude = float(row["lat"])
                 longitude = float(row["lon"])
                 conflict_id = str(row.get("conflict_id", "")) or None
+                gadm_id = str(row.get("gadm_id", "")).strip() or None
                 article_title = str(row.get("article_title", "") or "")[:80]
                 precision = str(row.get("geocode_precision", "")).strip().lower()
+                # Article publication month, for the dashed line on plots.
+                pub = pd.to_datetime(row.get("date_published", ""),
+                                     errors="coerce")
+                article_date = pub.strftime("%Y-%m") if pd.notna(pub) else None
 
                 if muni != "— select —":
                     location_label = f"{muni}, {region}, {country}"
@@ -520,35 +531,90 @@ def render_admin_mode(df: pd.DataFrame) -> None:
         if errors:
             for e in errors:
                 st.error(e)
-        else:
+        elif loc_mode.startswith("Enter"):
+            # Manual coordinates: no GADM polygon to clip the imagery to,
+            # so the pipeline can't run on this input yet.
             st.info(
-                "🚧  **Coming soon.**  The satellite pipeline is not yet "
-                "built. Once Phase 2 is wired up, this button will:\n\n"
-                "1. Download Sentinel-2 and rainfall data from the Microsoft "
-                "Planetary Computer for the selected date range and location\n"
-                "2. Compute the nine indicators (NDVI, EVI2, SAVI, NDMI, "
-                "NDWI, MNDWI, NDBI, BSI, and Rainfall)\n"
-                "3. Generate a time-series chart and a map for each indicator\n"
-                "4. Render a Quarto PDF slide deck in the chosen language"
+                "🚧  **Manual-coordinate analysis is coming soon.**  The "
+                "pipeline needs an administrative polygon (GADM) to define "
+                "the analysis area, which manual points don't have yet. "
+                "For now, pick a conflict from the database instead."
             )
+        elif not gadm_id:
+            st.error(
+                "This conflict has no GADM ID, so there's no polygon to "
+                "define the analysis area. Pick a different conflict, or "
+                "re-run `python3 run_all.py` so `match_admin.py` can "
+                "assign one."
+            )
+        else:
+            # Import here (not at the top) so the deployed Streamlit Cloud
+            # copy — which doesn't install the geo libraries — still loads
+            # fine and just can't run analyses.
+            try:
+                from satellite_pilot import run_analysis
+            except Exception:
+                st.warning(
+                    "⚠️ **Satellite analysis runs locally only.**  This "
+                    "deployed version can't download satellite data. To "
+                    "run an analysis, clone the repo and run "
+                    "`streamlit run app.py` on your machine."
+                )
+                return
 
-            with st.expander("Configuration captured", expanded=True):
-                st.json({
-                    "time_frame": {
-                        "start_date": str(start_date),
-                        "end_date": str(end_date),
-                    },
-                    "location": {
-                        "mode": ("database" if loc_mode.startswith("Pick")
-                                 else "manual"),
-                        "label": location_label,
-                        "latitude": latitude,
-                        "longitude": longitude,
-                        "conflict_id": conflict_id,
-                    },
-                    "industry": pretty_sector(industry),
-                    "language": language,
-                })
+            # Each conflict gets its own output folder so runs don't
+            # overwrite each other.
+            slug = (conflict_id or gadm_id).replace(".", "_")
+            out_dir = os.path.join("outputs", "analyses", slug)
+
+            article_label = None
+            if article_date:
+                article_label = f"Article publication ({article_date})"
+
+            st.markdown(f"**Analysis area:** {location_label}  \n"
+                        f"**GADM ID:** `{gadm_id}`  \n"
+                        f"**Window:** {start_date} → {end_date}  \n"
+                        f"**Outputs:** `{out_dir}/`")
+
+            with st.status("Running satellite analysis — this takes a "
+                           "while (each month is a download)...",
+                           expanded=True) as status:
+                log_box = st.container(height=300)
+
+                def log(msg):
+                    log_box.text(str(msg))
+
+                try:
+                    result = run_analysis(
+                        gadm_id=gadm_id,
+                        start_year=start_date.year,
+                        start_month=start_date.month,
+                        end_year=end_date.year,
+                        end_month=end_date.month,
+                        out_dir=out_dir,
+                        prefix=slug.lower(),
+                        area_title=location_label or None,
+                        article_date=article_date,
+                        article_label=article_label,
+                        log=log,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    status.update(state="error",
+                                  label="Analysis failed — see log above.")
+                    st.error(str(e))
+                    return
+
+                status.update(state="complete",
+                              label=f"Done — {result['months_done']} months "
+                                    f"with data.")
+
+            st.subheader("Results")
+            for png in result["plots"]:
+                st.image(str(png), use_container_width=True)
+            st.caption(f"Rasters and CSV saved to `{out_dir}/`. "
+                       f"(Report language *{language}* and industry "
+                       f"*{pretty_sector(industry)}* will be used by the "
+                       f"Quarto report step — not built yet.)")
 
 
 # ---------------------------------------------------------------------------
