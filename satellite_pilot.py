@@ -28,7 +28,9 @@
 # Outputs (in the chosen output folder):
 #   <prefix>_YYYY_MM_<index>.tif   one map per month per index
 #   indices_timeseries.csv         mean values inside the polygon, per month
-#   <index>_timeseries.png         one plot per index (8 total)
+#   <index>_timeseries.png         one time-series plot per index (8 total)
+#   <index>_map_before.png         map of the first available month
+#   <index>_map_after.png          map of the last available month
 # ============================================================
 
 import os
@@ -64,36 +66,51 @@ GADM_DIR = Path("shapefiles")
 # on the Planetary Computer STAC, so we prefer those.
 BANDS = ["BLUE", "GREEN", "RED", "NIR", "SWIR1"]
 
-# The 8 indices, each with a plot title, y-axis label, and line color.
+# The 8 indices, each with a plot title, y-axis label, line color, and
+# the matplotlib colormap used for the before/after maps. Colormaps are
+# picked per indicator category so the maps read intuitively:
+#   vegetation → red-to-green, greener = healthier
+#   moisture   → brown-to-teal, teal = wetter
+#   water      → blues
+#   built-up   → oranges, darker = more built-up
+#   bare soil  → yellow-orange-brown, darker = more bare
 # The `compute` function takes a dict {band: DataArray} and returns the
 # index DataArray.
 INDICES = {
     "ndvi":  {"title": "NDVI (vegetation greenness)",
               "color": "forestgreen",
+              "cmap":  "RdYlGn",
               "compute": lambda b: (b["NIR"] - b["RED"]) / (b["NIR"] + b["RED"])},
     "evi2":  {"title": "EVI2 (canopy structure)",
               "color": "seagreen",
+              "cmap":  "RdYlGn",
               "compute": lambda b: 2.5 * (b["NIR"] - b["RED"]) /
                                    (b["NIR"] + 2.4 * b["RED"] + 1.0)},
     "savi":  {"title": "SAVI (soil-adjusted vegetation / biomass)",
               "color": "olivedrab",
+              "cmap":  "YlGn",
               # L = 0.5 is the standard mid-range soil adjustment.
               "compute": lambda b: ((b["NIR"] - b["RED"]) /
                                     (b["NIR"] + b["RED"] + 0.5)) * 1.5},
     "ndmi":  {"title": "NDMI (vegetation moisture)",
               "color": "teal",
+              "cmap":  "BrBG",
               "compute": lambda b: (b["NIR"] - b["SWIR1"]) / (b["NIR"] + b["SWIR1"])},
     "ndwi":  {"title": "NDWI (surface water — McFeeters)",
               "color": "steelblue",
+              "cmap":  "Blues",
               "compute": lambda b: (b["GREEN"] - b["NIR"]) / (b["GREEN"] + b["NIR"])},
     "mndwi": {"title": "MNDWI (water bodies)",
               "color": "royalblue",
+              "cmap":  "Blues",
               "compute": lambda b: (b["GREEN"] - b["SWIR1"]) / (b["GREEN"] + b["SWIR1"])},
     "ndbi":  {"title": "NDBI (built-up / urbanization)",
               "color": "sienna",
+              "cmap":  "Oranges",
               "compute": lambda b: (b["SWIR1"] - b["NIR"]) / (b["SWIR1"] + b["NIR"])},
     "bsi":   {"title": "BSI (bare soil)",
               "color": "chocolate",
+              "cmap":  "YlOrBr",
               "compute": lambda b: (((b["SWIR1"] + b["RED"]) - (b["NIR"] + b["BLUE"])) /
                                     ((b["SWIR1"] + b["RED"]) + (b["NIR"] + b["BLUE"])))},
 }
@@ -202,6 +219,32 @@ def compute_monthly_indices(bbox, year, month, log=print):
     return results
 
 
+def _render_map(arr, aoi, title, cmap, vmin, vmax, cbar_label, out_path):
+    """Render one indicator map to a PNG.
+
+    Uses a shared vmin/vmax across the before/after pair so the visual
+    comparison is honest — same colour = same value across both maps.
+    The AOI polygon is drawn on top in black for context."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(11, 7))
+    arr.plot(
+        ax=ax, cmap=cmap, vmin=vmin, vmax=vmax,
+        add_colorbar=True,
+        cbar_kwargs={"label": cbar_label},
+    )
+    aoi.boundary.plot(ax=ax, edgecolor="black", linewidth=1)
+    ax.set_title(title)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_aspect("equal")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def run_analysis(gadm_id, start_year, start_month, end_year, end_month,
                  out_dir, prefix="area", area_title=None,
                  article_date=None, article_label=None,
@@ -222,7 +265,25 @@ def run_analysis(gadm_id, start_year, start_month, end_year, end_month,
     log           : where progress messages go (print for Terminal;
                     the app passes its own so messages show on screen)
 
-    Returns a dict: {"csv": path, "plots": [paths], "months_done": int}
+    Returns a dict:
+      {
+        "csv":          path to indices_timeseries.csv,
+        "plots":        list of time-series PNG paths (kept for
+                        backwards compatibility),
+        "months_done":  number of months where any data was downloaded,
+        "indicator_results": list of dicts, one per indicator, each with:
+          {
+            "name":              short key, e.g. "ndvi",
+            "title":             human-readable title,
+            "timeseries_path":   path to the time series PNG,
+            "before_path":       path to the "first month" map PNG,
+                                 or None if not available,
+            "before_label":      "YYYY-MM" of the first-month map,
+            "after_path":        path to the "last month" map PNG,
+                                 or None if not available,
+            "after_label":       "YYYY-MM" of the last-month map,
+          }
+      }
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -290,18 +351,44 @@ def run_analysis(gadm_id, start_year, start_month, end_year, end_month,
     csv_path = out_dir / "indices_timeseries.csv"
     df.to_csv(csv_path, index=False)
 
-    # ---- Plots (one per index) ----
+    # ---- Time-series plots + before/after maps (one row per index) ----
+    # For the maps we use the first and last months in the window that
+    # actually have all 8 tifs on disk. If the user's start/end month has
+    # no cloud-free data, we fall back to the next/previous available
+    # month, and record which one we used in the map label so it's
+    # honest about what the picture shows.
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    months_with_data = [(y, m) for (y, m) in months if all_tifs_exist(y, m)]
+    if len(months_with_data) >= 2:
+        before_key = months_with_data[0]
+        after_key = months_with_data[-1]
+    else:
+        before_key = after_key = None
+        log("  ⚠️  fewer than 2 months with data — skipping before/after maps.")
+
     plot_paths = []
+    indicator_results = []
     for name, spec in INDICES.items():
         col = f"mean_{name}"
+        result = {
+            "name": name,
+            "title": spec["title"],
+            "timeseries_path": None,
+            "before_path": None,
+            "before_label": None,
+            "after_path": None,
+            "after_label": None,
+        }
+
         if df[col].isna().all():
-            log(f"  ⚠️  no data for {name.upper()}, skipping plot")
+            log(f"  ⚠️  no data for {name.upper()}, skipping plots")
+            indicator_results.append(result)
             continue
 
+        # ---- Time series ----
         fig, ax = plt.subplots(figsize=(11, 5))
         ax.plot(df["date"], df[col], marker="o", color=spec["color"])
         # Dashed line only if the article date falls inside the window.
@@ -316,14 +403,80 @@ def run_analysis(gadm_id, start_year, start_month, end_year, end_month,
         ax.tick_params(axis="x", rotation=60)
         ax.grid(alpha=0.3)
         fig.tight_layout()
-        png = out_dir / f"{name}_timeseries.png"
-        fig.savefig(png, dpi=150)
+        ts_png = out_dir / f"{name}_timeseries.png"
+        fig.savefig(ts_png, dpi=150)
         plt.close(fig)
-        plot_paths.append(png)
+        plot_paths.append(ts_png)
+        result["timeseries_path"] = ts_png
 
+        # ---- Before / after maps ----
+        if before_key and after_key and before_key != after_key:
+            b_tif = tif_path(*before_key, name)
+            a_tif = tif_path(*after_key, name)
+            if b_tif.exists() and a_tif.exists():
+                try:
+                    b_arr = rioxarray.open_rasterio(b_tif, masked=True).squeeze()
+                    a_arr = rioxarray.open_rasterio(a_tif, masked=True).squeeze()
+
+                    # Shared colour scale across both maps so the visual
+                    # comparison isn't lying. Percentile clip (2nd–98th)
+                    # to keep a few outlier pixels from washing out the
+                    # colour ramp for everything else.
+                    joint = np.concatenate([
+                        b_arr.values[np.isfinite(b_arr.values)].ravel(),
+                        a_arr.values[np.isfinite(a_arr.values)].ravel(),
+                    ])
+                    if joint.size == 0:
+                        log(f"  ⚠️  {name.upper()}: no finite pixels, "
+                            f"skipping maps")
+                    else:
+                        vmin, vmax = np.percentile(joint, [2, 98])
+                        if vmax <= vmin:
+                            vmax = vmin + 1e-6
+
+                        b_label = f"{before_key[0]}-{before_key[1]:02d}"
+                        a_label = f"{after_key[0]}-{after_key[1]:02d}"
+
+                        b_png = out_dir / f"{name}_map_before.png"
+                        a_png = out_dir / f"{name}_map_after.png"
+
+                        _render_map(
+                            b_arr, aoi,
+                            title=f"{name.upper()} — Before "
+                                  f"({b_label}) — {area_title}",
+                            cmap=spec.get("cmap", "viridis"),
+                            vmin=vmin, vmax=vmax,
+                            cbar_label=name.upper(),
+                            out_path=b_png,
+                        )
+                        _render_map(
+                            a_arr, aoi,
+                            title=f"{name.upper()} — After "
+                                  f"({a_label}) — {area_title}",
+                            cmap=spec.get("cmap", "viridis"),
+                            vmin=vmin, vmax=vmax,
+                            cbar_label=name.upper(),
+                            out_path=a_png,
+                        )
+                        result["before_path"] = b_png
+                        result["before_label"] = b_label
+                        result["after_path"] = a_png
+                        result["after_label"] = a_label
+                except Exception as e:  # noqa: BLE001
+                    log(f"  ⚠️  {name.upper()}: map render failed ({e})")
+
+        indicator_results.append(result)
+
+    n_map_pairs = sum(1 for r in indicator_results if r["before_path"])
     log(f"\n✅ DONE — {months_done} months with data, "
-        f"{len(plot_paths)} plots. See {out_dir}/")
-    return {"csv": csv_path, "plots": plot_paths, "months_done": months_done}
+        f"{len(plot_paths)} time series, "
+        f"{n_map_pairs} before/after map pairs. See {out_dir}/")
+    return {
+        "csv": csv_path,
+        "plots": plot_paths,
+        "months_done": months_done,
+        "indicator_results": indicator_results,
+    }
 
 
 def main():
