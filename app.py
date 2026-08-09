@@ -609,8 +609,28 @@ def render_admin_mode(df: pd.DataFrame) -> None:
                                     f"with data.")
 
             st.subheader("Results")
-            for png in result["plots"]:
-                st.image(str(png), use_container_width=True)
+            # For each indicator we show:
+            #   1. the time-series plot,
+            #   2. the "before" map (first available month), and
+            #   3. the "after" map (last available month),
+            # all stacked full-width. The maps use a shared colour scale
+            # per indicator so the visual comparison is honest.
+            indicator_results = result.get("indicator_results")
+            if indicator_results:
+                for r in indicator_results:
+                    if r.get("timeseries_path"):
+                        st.image(str(r["timeseries_path"]),
+                                 use_container_width=True)
+                    if r.get("before_path") and r.get("after_path"):
+                        st.image(str(r["before_path"]),
+                                 use_container_width=True)
+                        st.image(str(r["after_path"]),
+                                 use_container_width=True)
+                    st.markdown("")  # small vertical breather between indicators
+            else:
+                # Fallback for older result dicts (no indicator_results key).
+                for png in result["plots"]:
+                    st.image(str(png), use_container_width=True)
             st.caption(f"Rasters and CSV saved to `{out_dir}/`. "
                        f"(Report language *{language}* and industry "
                        f"*{pretty_sector(industry)}* will be used by the "
