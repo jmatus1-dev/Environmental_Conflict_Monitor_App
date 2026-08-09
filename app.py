@@ -622,10 +622,13 @@ def render_admin_mode(df: pd.DataFrame) -> None:
                         st.image(str(r["timeseries_path"]),
                                  use_container_width=True)
                     if r.get("before_path") and r.get("after_path"):
-                        st.image(str(r["before_path"]),
-                                 use_container_width=True)
-                        st.image(str(r["after_path"]),
-                                 use_container_width=True)
+                        left, right = st.columns(2)
+                        with left:
+                            st.image(str(r["before_path"]),
+                                     use_container_width=True)
+                        with right:
+                            st.image(str(r["after_path"]),
+                                     use_container_width=True)
                     st.markdown("")  # small vertical breather between indicators
             else:
                 # Fallback for older result dicts (no indicator_results key).
