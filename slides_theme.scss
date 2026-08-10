@@ -1,0 +1,74 @@
+/*-- scss:defaults --*/
+
+// AImpact Lab palette — earthy environmental identity.
+// Swap these four values if official brand colors arrive later.
+$aimpact-green:  #2E6E4E;   // deep forest green (headings, accents)
+$aimpact-dark:   #1B3A2C;   // near-black green (title slide headings)
+$aimpact-terra:  #C4682F;   // terracotta accent (links, highlights)
+$grey-dark:      #374649;
+$grey-mid:       #7A8487;
+$grey-light:     #F4F3EF;   // warm off-white
+
+// reveal.js theme variables
+$body-bg:           #FFFFFF;
+$body-color:        $grey-dark;
+$link-color:        $aimpact-terra;
+$selection-bg:      lighten($aimpact-green, 45%);
+
+$main-font:         "Source Sans Pro", "Helvetica Neue", Arial, sans-serif;
+$main-font-size:    32px;
+$main-color:        $grey-dark;
+
+$heading-font:      "Source Sans Pro", "Helvetica Neue", Arial, sans-serif;
+$heading-color:     $aimpact-green;
+$heading-line-height: 1.2;
+$heading-letter-spacing: -0.01em;
+$heading-text-transform: none;
+$heading-font-weight: 700;
+
+$presentation-heading-color: $aimpact-green;
+
+$code-color: $aimpact-terra;
+
+/*-- scss:rules --*/
+
+.reveal {
+  font-family: $main-font;
+  font-size: $main-font-size;
+  color: $main-color;
+}
+
+// Title slide
+#title-slide h1 {
+  color: $aimpact-dark;
+  font-size: 1.6em;
+}
+#title-slide .subtitle {
+  color: $aimpact-green;
+}
+#title-slide .author {
+  color: $grey-dark;
+  font-weight: 600;
+}
+
+// Section divider slides (level-1 headings on their own slide)
+.reveal .slide section h1 {
+  color: $aimpact-green;
+}
+
+// Keep plot images comfortably inside the slide
+.reveal img {
+  max-height: 78vh;
+  object-fit: contain;
+}
+
+// Footer
+.reveal .footer {
+  color: $grey-mid;
+  font-size: 0.45em;
+}
+
+// Contents slide list spacing
+.reveal ul li {
+  margin-bottom: 0.4em;
+}
