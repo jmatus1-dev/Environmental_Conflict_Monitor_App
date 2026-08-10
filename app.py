@@ -608,36 +608,95 @@ def render_admin_mode(df: pd.DataFrame) -> None:
                               label=f"Done — {result['months_done']} months "
                                     f"with data.")
 
-            st.subheader("Results")
-            # For each indicator we show:
-            #   1. the time-series plot,
-            #   2. the "before" map (first available month), and
-            #   3. the "after" map (last available month),
-            # all stacked full-width. The maps use a shared colour scale
-            # per indicator so the visual comparison is honest.
-            indicator_results = result.get("indicator_results")
-            if indicator_results:
-                for r in indicator_results:
-                    if r.get("timeseries_path"):
-                        st.image(str(r["timeseries_path"]),
+            # Stash everything the results section (and the slide deck
+            # generator) needs. Streamlit re-runs this whole script on
+            # every button click, so without this the results would
+            # vanish the moment any other button is pressed.
+            st.session_state["last_analysis"] = {
+                "result": result,
+                "out_dir": out_dir,
+                "location_label": location_label,
+                "industry_label": pretty_sector(industry),
+                "language": language,
+            }
+
+    # ---- Results (rendered from session state so they persist) ----------
+    last = st.session_state.get("last_analysis")
+    if last:
+        result = last["result"]
+        out_dir = last["out_dir"]
+
+        st.subheader("Results")
+        # For each indicator we show:
+        #   1. the time-series plot,
+        #   2. the "before" map (first available month), and
+        #   3. the "after" map (last available month),
+        # side by side under the time series. The maps use a shared
+        # colour scale per indicator so the visual comparison is honest.
+        indicator_results = result.get("indicator_results")
+        if indicator_results:
+            for r in indicator_results:
+                if r.get("timeseries_path"):
+                    st.image(str(r["timeseries_path"]),
+                             use_container_width=True)
+                if r.get("before_path") and r.get("after_path"):
+                    left, right = st.columns(2)
+                    with left:
+                        st.image(str(r["before_path"]),
                                  use_container_width=True)
-                    if r.get("before_path") and r.get("after_path"):
-                        left, right = st.columns(2)
-                        with left:
-                            st.image(str(r["before_path"]),
-                                     use_container_width=True)
-                        with right:
-                            st.image(str(r["after_path"]),
-                                     use_container_width=True)
-                    st.markdown("")  # small vertical breather between indicators
-            else:
-                # Fallback for older result dicts (no indicator_results key).
-                for png in result["plots"]:
-                    st.image(str(png), use_container_width=True)
-            st.caption(f"Rasters and CSV saved to `{out_dir}/`. "
-                       f"(Report language *{language}* and industry "
-                       f"*{pretty_sector(industry)}* will be used by the "
-                       f"Quarto report step — not built yet.)")
+                    with right:
+                        st.image(str(r["after_path"]),
+                                 use_container_width=True)
+                st.markdown("")  # small vertical breather between indicators
+        else:
+            # Fallback for older result dicts (no indicator_results key).
+            for png in result["plots"]:
+                st.image(str(png), use_container_width=True)
+        st.caption(f"Rasters and CSV saved to `{out_dir}/`.")
+
+        # ---- Slide deck -------------------------------------------------
+        st.subheader("Slide deck")
+        st.caption(f"Language: *{last['language']}* · Industry: "
+                   f"*{last['industry_label']}* (from the form above, "
+                   f"as set when the analysis ran).")
+        if st.button("📊  Generate slide deck (PDF)"):
+            try:
+                from report_slides import build_deck
+            except Exception:
+                st.warning(
+                    "⚠️ **Slide decks are generated locally only.** "
+                    "Clone the repo and run `streamlit run app.py` on "
+                    "your machine."
+                )
+                return
+            with st.status("Building slide deck...", expanded=True) as s:
+                deck_log = st.container(height=200)
+
+                def dlog(msg):
+                    deck_log.text(str(msg))
+
+                try:
+                    pdf_path = build_deck(
+                        indicator_results=result["indicator_results"],
+                        out_dir=out_dir,
+                        industry_label=last["industry_label"],
+                        area_label=last["location_label"] or "",
+                        language=last["language"],
+                        log=dlog,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    s.update(state="error", label="Deck failed.")
+                    st.error(str(e))
+                    return
+                s.update(state="complete", label="Deck ready.")
+
+            with open(pdf_path, "rb") as f:
+                st.download_button(
+                    "⬇️  Download slides (PDF)", f,
+                    file_name=os.path.basename(pdf_path),
+                    mime="application/pdf",
+                )
+            st.caption(f"Also saved at `{pdf_path}`.")
 
 
 # ---------------------------------------------------------------------------
