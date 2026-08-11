@@ -1,5 +1,5 @@
 """
-app.py - Step 4: the Streamlit dashboard.
+app.py - 
  
 Reads the single combined CSV produced by the pipeline (scrape -> enrich ->
 geocode) and renders:
