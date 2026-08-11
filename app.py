@@ -1,5 +1,5 @@
 """
-app.py - 
+app.py
  
 Reads the single combined CSV produced by the pipeline (scrape -> enrich ->
 geocode) and renders:
