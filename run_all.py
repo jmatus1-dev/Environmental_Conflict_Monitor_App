@@ -37,12 +37,23 @@ import common
 import scraper_elespectador as ee
 import scraper_infoamazonia as ia
 import scraper_mongabay as mb
+import scraper_guardian as gu
+import scraper_dialogue_earth as de
+import scraper_ojopublico as op
+import scraper_agenciapublica as ag
+import scraper_grist as gr
 
-# The registry of available scrapers. Adding a 4th source later = one line.
+# The registry of available scrapers. Adding a new source later = one
+# import + one line here.
 SCRAPERS = {
     "elespectador": ee,
     "infoamazonia": ia,
     "mongabay": mb,
+    "guardian": gu,
+    "dialogue_earth": de,
+    "ojopublico": op,
+    "agenciapublica": ag,
+    "grist": gr,
 }
 
 DEFAULT_OUT = os.path.join("data", "combined.csv")
