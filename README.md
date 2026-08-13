@@ -10,7 +10,7 @@ over time, renders before/after maps, and generates a **PDF slide deck**
 (English or Spanish) branded for AImpact Lab.
 
 Built by Julieta Matus during a summer internship with AImpact Lab,
-supervised by Hernando Grueso.
+supervised by Hernando Grueso and Will Nielsen.
 
 ---
 
